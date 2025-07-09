@@ -1,0 +1,17 @@
+streamlit
+sqlalchemy
+psycopg2-binary
+pgvector
+beautifulsoup4
+tqdm
+pydantic
+# For embedding: one of these, to be chosen/configured EXTENSIBLY
+sentence-transformers
+transformers
+# For package management/optional local embeddings
+torch
+# For HTML chunking, etc.
+lxml
+# For BM25 and hybrid search
+rank_bm25
+requests
