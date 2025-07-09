@@ -6,6 +6,8 @@ Streamlit front end for auslegalsearchv2.
 - Lets user choose embedding model in sidebar for ingestion, and shows which is used.
 - Auto-detects GPUs; launches 1 worker per GPU with data partitioning for max parallelism. Falls back to 1 process when no GPU available.
 - STOP INGESTION resets stopped pipeline in DB and UI and works for both single and multi-GPU runs.
+- Ensures each embedding_worker processes a unique, assigned partition of files (no overlap, progress is exact), even with multiple recursive directories.
+- Shows percentage/progress bar for files, chunk count as plain number (not percent/progress).
 """
 
 import streamlit as st
@@ -104,13 +106,21 @@ elif resume_clicked:
 elif st.session_state["session_page_state"]:
     session_choice_made = True
 
-def launch_embedding_worker(session_name, embedding_model, gpu=None, filelist=None):
+def write_partition_file(partition, fname):
+    with open(fname, "w") as f:
+        for item in partition:
+            f.write(item + "\n")
+
+def launch_embedding_worker(session_name, embedding_model, gpu=None, partition_file=None):
     python_exec = os.environ.get("PYTHON_EXEC", "python3")
     script_path = os.path.join(os.getcwd(), "embedding_worker.py")
     env = dict(os.environ)
     if gpu is not None:
         env["CUDA_VISIBLE_DEVICES"] = str(gpu)
     args = [python_exec, script_path, session_name, embedding_model]
+    if partition_file:
+        args.append("--partition_file")
+        args.append(partition_file)
     proc = subprocess.Popen(args, env=env)
     return proc
 
@@ -118,7 +128,6 @@ def get_completed_file_count(session_name):
     sess = get_session(session_name)
     if sess:
         return get_completed_file_count_sessname(session_name)
-    # If parent does not exist, try to sum all child gpu session completions
     total = 0
     for i in range(16):
         sfx = f"{session_name}-gpu{i}"
@@ -138,7 +147,6 @@ def get_total_files(session_name):
     sess = get_session(session_name)
     if sess:
         return sess.total_files or 0
-    # If parent session is None, sum total_files from known subtasks
     total = 0
     for i in range(16):
         sfx = f"{session_name}-gpu{i}"
@@ -151,7 +159,6 @@ def get_processed_chunks(session_name):
     sess = get_session(session_name)
     if sess:
         return sess.processed_chunks or 0
-    # If parent session is None, sum across children
     total = 0
     for i in range(16):
         sfx = f"{session_name}-gpu{i}"
@@ -160,23 +167,20 @@ def get_processed_chunks(session_name):
             total += child_sess.processed_chunks
     return total
 
-def poll_session_progress_bars(session_name, file_bar=None, chunk_bar=None, stat_line=None):
+def poll_session_progress_bars(session_name, file_bar=None, chunk_bar_text=None, stat_line=None):
     completed_files = get_completed_file_count(session_name)
     total_files = get_total_files(session_name)
     processed_chunks = get_processed_chunks(session_name)
-    # for status, try first main session, otherwise patch together
     sess = get_session(session_name)
     stat = sess.status if sess else '-'
     if total_files > 0:
         file_ratio = min(1.0, completed_files / total_files)
-        chunk_ratio = min(1.0, processed_chunks / max(1, (total_files * 10)))
     else:
-        file_ratio = chunk_ratio = 0
+        file_ratio = 0
     if stat_line: stat_line.write(f"**Status:** {stat}")
     if file_bar: file_bar.progress(file_ratio)
     if file_bar: file_bar_text.write(f"Files embedded: {completed_files} / {total_files}")
-    if chunk_bar: chunk_bar.progress(chunk_ratio)
-    if chunk_bar: chunk_bar_text.write(f"Chunks embedded: {processed_chunks}")
+    if chunk_bar_text: chunk_bar_text.write(f"Chunks processed: {processed_chunks}")
     return stat
 
 def stop_current_ingest_sessions(session_name, multi_gpu=False):
@@ -252,9 +256,11 @@ if (st.session_state.get("run_ingest") or run_ingest_triggered) and session_choi
                 procs = []
                 for i in range(num_gpus):
                     sess_name = f"{session_name}-gpu{i}"
+                    partition_fname = f".gpu-partition-{sess_name}.txt"
+                    write_partition_file(sublists[i], partition_fname)
                     sess = start_session(sess_name, selected_dirs[0], total_files=len(sublists[i]), total_chunks=None)
                     sessions.append(sess)
-                    proc = launch_embedding_worker(sess_name, selected_embedding_model, gpu=i)
+                    proc = launch_embedding_worker(sess_name, selected_embedding_model, gpu=i, partition_file=partition_fname)
                     procs.append(proc)
                 st.success(f"Started {num_gpus} embedding workers in parallel (each on a separate GPU). Sessions: {[s.session_name for s in sessions]}")
             else:
@@ -265,10 +271,10 @@ if (st.session_state.get("run_ingest") or run_ingest_triggered) and session_choi
             stat_line = st.empty()
             file_bar = st.empty()
             file_bar_text = st.empty()
-            chunk_bar = st.empty()
+            # Only show number of chunks as integer, not percent/progress bar
             chunk_bar_text = st.empty()
             for _ in range(100000):
-                stat = poll_session_progress_bars(session_name, file_bar, chunk_bar, stat_line)
+                stat = poll_session_progress_bars(session_name, file_bar, chunk_bar_text, stat_line)
                 time.sleep(poll_sec)
                 if stat in {"complete", "error"}: break
             st.write(f"Session `{session_name}` finished with status {stat}.")
@@ -283,10 +289,9 @@ if (st.session_state.get("run_ingest") or run_ingest_triggered) and session_choi
         stat_line = st.empty()
         file_bar = st.empty()
         file_bar_text = st.empty()
-        chunk_bar = st.empty()
         chunk_bar_text = st.empty()
         for _ in range(100000):
-            stat = poll_session_progress_bars(session_name, file_bar, chunk_bar, stat_line)
+            stat = poll_session_progress_bars(session_name, file_bar, chunk_bar_text, stat_line)
             time.sleep(1.0)
             if stat in {"complete", "error"}: break
         st.write(f"Session `{session_name}` finished with status {stat}.")
