@@ -4,6 +4,7 @@ embedding_worker.py
 Parallel vectorization/embedding worker for auslegalsearchv2.
 Optimized: For each file, all chunks are embedded in a batch, and DB
 inserts (Documents and Embeddings) are done in a single transaction per file.
+Supports "--partition_file <list>" to restrict to a pre-partitioned file list (for multi-GPU).
 """
 
 import sys
@@ -46,13 +47,18 @@ def mark_file_error(session_name, filepath):
             session.add(f)
         session.commit()
 
-def run_embedding_session(session_name, poll_interval=1.0):
+def read_partition_file(fname):
+    with open(fname, "r") as f:
+        return [line.strip() for line in f if line.strip()]
+
+def run_embedding_session(session_name, file_list=None, poll_interval=1.0):
     sess = get_session(session_name)
     if not sess:
         print(f"Session {session_name} not found in DB.")
         return
     target_dir = sess.directory
-    file_list = list(walk_legal_files([target_dir]))
+    if file_list is None:
+        file_list = list(walk_legal_files([target_dir]))
     completed_files = get_completed_files(session_name)
     total_files = len(file_list)
     processed_chunks = sess.processed_chunks or 0
@@ -79,11 +85,9 @@ def run_embedding_session(session_name, poll_interval=1.0):
             chunk_texts = [c["text"] for c in chunks]
             errored = False
             try:
-                # Batch embed all chunk texts
                 if not chunk_texts:
                     continue
                 vectors = embedder.embed(chunk_texts)
-                # Bulk add all docs and embeddings in one session/commit
                 with SessionLocal() as session:
                     doc_objs = []
                     embed_objs = []
@@ -94,7 +98,7 @@ def run_embedding_session(session_name, poll_interval=1.0):
                             format=c.get("format", ext.strip(".")),
                         )
                         session.add(doc_obj)
-                        session.flush()  # Get doc_obj.id for embedding FK
+                        session.flush()
                         doc_objs.append(doc_obj)
                         embed_objs.append(
                             Embedding(
@@ -106,7 +110,6 @@ def run_embedding_session(session_name, poll_interval=1.0):
                     session.add_all(embed_objs)
                     session.commit()
                     processed_chunks += len(chunks)
-                # After successful commit for file
                 update_session_progress(session_name, filepath, len(chunks) - 1, processed_chunks)
                 mark_file_complete(session_name, filepath)
             except Exception as e:
@@ -115,7 +118,6 @@ def run_embedding_session(session_name, poll_interval=1.0):
                 mark_file_error(session_name, filepath)
                 fail_session(session_name)
                 return
-            # Check for stop flag after each file
             sess = get_session(session_name)
             if sess and sess.status == "error":
                 print(f"Ingestion interrupted by user or stop request in DB for session {session_name}.")
@@ -129,7 +131,14 @@ def run_embedding_session(session_name, poll_interval=1.0):
         raise
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python embedding_worker.py <session_name>")
-        sys.exit(1)
-    run_embedding_session(sys.argv[1])
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("session_name")
+    parser.add_argument("embedding_model")
+    parser.add_argument("--partition_file", default=None)
+    args = parser.parse_args()
+    if args.partition_file:
+        fnames = read_partition_file(args.partition_file)
+        run_embedding_session(args.session_name, file_list=fnames)
+    else:
+        run_embedding_session(args.session_name)

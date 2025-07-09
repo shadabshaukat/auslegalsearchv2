@@ -1,10 +1,13 @@
 """
 Streamlit front end for auslegalsearchv2.
-Now:
 - Ensures progress bars never crash (values clamped to [0, 1]).
 - Resume button labeled "Resume Session".
 - Shows DB string with password masked plus a code-block, with DB URL breakdown.
 - Lets user choose embedding model in sidebar for ingestion, and shows which is used.
+- Auto-detects GPUs; launches 1 worker per GPU with data partitioning for max parallelism. Falls back to 1 process when no GPU available.
+- STOP INGESTION resets stopped pipeline in DB and UI and works for both single and multi-GPU runs.
+- Ensures each embedding_worker processes a unique, assigned partition of files (no overlap, progress is exact), even with multiple recursive directories.
+- Shows percentage/progress bar for files, chunk count as plain number (not percent/progress).
 """
 
 import streamlit as st
@@ -23,16 +26,36 @@ import subprocess
 import time
 import re
 
+def get_num_gpus():
+    try:
+        import torch
+        return torch.cuda.device_count()
+    except Exception:
+        try:
+            out = subprocess.check_output(['nvidia-smi', '--list-gpus']).decode()
+            return len([l for l in out.split('\n') if 'GPU' in l])
+        except Exception:
+            return 0
+
+def partition(lst, n):
+    k, m = divmod(len(lst), n)
+    return [lst[i * k + min(i, m):(i + 1) * k + min(i + 1, m)] for i in range(n)]
+
+def get_child_gpu_sessions(parent_session):
+    with SessionLocal() as session:
+        pattern = f"{parent_session}-gpu%"
+        # Use LIKE for matching all child session names
+        return session.query(type(get_session(parent_session))).filter(type(get_session(parent_session)).session_name.like(pattern)).all()
+
 st.set_page_config(page_title="AUSLegalSearch v2", layout="wide")
 st.title("AUSLegalSearch v2 – Legal Document Search, Background Embedding & RAG")
 
 if "directories" not in st.session_state:
     st.session_state["directories"] = set()
 
-# --- EMBEDDING MODEL SELECTION ---
 EMBEDDING_MODELS = [
-    "all-MiniLM-L6-v2",  # Default, but more can be added here
-    # Add: "multi-qa-MiniLM-L6-cos-v1","paraphrase-MiniLM-L6-v2", ...
+    "all-MiniLM-L6-v2",
+    # Add more models as needed
 ]
 selected_embedding_model = st.sidebar.selectbox(
     "Embedding Model (for chunk/vectorization)",
@@ -41,7 +64,6 @@ selected_embedding_model = st.sidebar.selectbox(
 )
 st.sidebar.caption(f"Embedding model in use: `{selected_embedding_model}`")
 
-# --- DB DEBUG URL DISPLAY ---
 db_url = os.environ.get("AUSLEGALSEARCH_DB_URL", "")
 if db_url:
     db_url_masked = re.sub(r'(://[^:]+:)[^@]+@', r'\1*****@', db_url)
@@ -84,7 +106,92 @@ elif resume_clicked:
 elif st.session_state["session_page_state"]:
     session_choice_made = True
 
-# --- START NEW SESSION PAGE ---
+def write_partition_file(partition, fname):
+    with open(fname, "w") as f:
+        for item in partition:
+            f.write(item + "\n")
+
+def launch_embedding_worker(session_name, embedding_model, gpu=None, partition_file=None):
+    python_exec = os.environ.get("PYTHON_EXEC", "python3")
+    script_path = os.path.join(os.getcwd(), "embedding_worker.py")
+    env = dict(os.environ)
+    if gpu is not None:
+        env["CUDA_VISIBLE_DEVICES"] = str(gpu)
+    args = [python_exec, script_path, session_name, embedding_model]
+    if partition_file:
+        args.append("--partition_file")
+        args.append(partition_file)
+    proc = subprocess.Popen(args, env=env)
+    return proc
+
+def get_completed_file_count(session_name):
+    sess = get_session(session_name)
+    if sess:
+        return get_completed_file_count_sessname(session_name)
+    total = 0
+    for i in range(16):
+        sfx = f"{session_name}-gpu{i}"
+        child_sess = get_session(sfx)
+        if child_sess:
+            with SessionLocal() as session:
+                count = session.query(EmbeddingSessionFile).filter_by(session_name=sfx, status="complete").count()
+                total += count
+    return total
+
+def get_completed_file_count_sessname(sessname):
+    with SessionLocal() as session:
+        count = session.query(EmbeddingSessionFile).filter_by(session_name=sessname, status="complete").count()
+        return count
+
+def get_total_files(session_name):
+    sess = get_session(session_name)
+    if sess:
+        return sess.total_files or 0
+    total = 0
+    for i in range(16):
+        sfx = f"{session_name}-gpu{i}"
+        child_sess = get_session(sfx)
+        if child_sess:
+            total += child_sess.total_files or 0
+    return total
+
+def get_processed_chunks(session_name):
+    sess = get_session(session_name)
+    if sess:
+        return sess.processed_chunks or 0
+    total = 0
+    for i in range(16):
+        sfx = f"{session_name}-gpu{i}"
+        child_sess = get_session(sfx)
+        if child_sess and getattr(child_sess, "processed_chunks", None) is not None:
+            total += child_sess.processed_chunks
+    return total
+
+def poll_session_progress_bars(session_name, file_bar=None, chunk_bar_text=None, stat_line=None):
+    completed_files = get_completed_file_count(session_name)
+    total_files = get_total_files(session_name)
+    processed_chunks = get_processed_chunks(session_name)
+    sess = get_session(session_name)
+    stat = sess.status if sess else '-'
+    if total_files > 0:
+        file_ratio = min(1.0, completed_files / total_files)
+    else:
+        file_ratio = 0
+    if stat_line: stat_line.write(f"**Status:** {stat}")
+    if file_bar: file_bar.progress(file_ratio)
+    if file_bar: file_bar_text.write(f"Files embedded: {completed_files} / {total_files}")
+    if chunk_bar_text: chunk_bar_text.write(f"Chunks processed: {processed_chunks}")
+    return stat
+
+def stop_current_ingest_sessions(session_name, multi_gpu=False):
+    fail_session(session_name)
+    if multi_gpu:
+        for i in range(16):
+            sfx = f"{session_name}-gpu{i}"
+            sess = get_session(sfx)
+            if sess:
+                fail_session(sfx)
+
 if st.session_state["session_page_state"] == "NEW":
     session_name = st.sidebar.text_input("New Session Name", st.session_state.get("session_name", f"sess-{datetime.now().strftime('%Y%m%d-%H%M%S')}"))
     st.session_state["session_name"] = session_name
@@ -103,7 +210,6 @@ if st.session_state["session_page_state"] == "NEW":
     selected_dirs = sorted(st.session_state["directories"])
     run_ingest_triggered = st.sidebar.button("Start Ingestion", disabled=not(session_name and selected_dirs), key="start_ingest_btn")
     stop_ingest_triggered = st.sidebar.button("Stop Ingestion", key="stop_ingest_btn")
-
 elif st.session_state["session_page_state"] == "RESUME":
     from db.store import get_resume_sessions
     sessions = get_resume_sessions()
@@ -119,45 +225,19 @@ elif st.session_state["session_page_state"] == "RESUME":
 else:
     run_ingest_triggered = stop_ingest_triggered = False
 
-def get_completed_file_count(session_name):
-    with SessionLocal() as session:
-        count = session.query(EmbeddingSessionFile).filter_by(session_name=session_name, status="complete").count()
-        return count
-
-def get_total_files(session_name):
-    sess = get_session(session_name)
-    if sess:
-        return sess.total_files or 0
-    return 0
-
-def get_processed_chunks(session_name):
-    sess = get_session(session_name)
-    return sess.processed_chunks or 0
-
-def poll_session_progress_bars(session_name, file_bar=None, chunk_bar=None, stat_line=None):
-    completed_files = get_completed_file_count(session_name)
-    total_files = get_total_files(session_name)
-    processed_chunks = get_processed_chunks(session_name)
-    sess = get_session(session_name)
-    stat = sess.status if sess else '-'
-    if total_files > 0:
-        file_ratio = min(1.0, completed_files / total_files)
-        chunk_ratio = min(1.0, processed_chunks / max(1, (total_files * 10)))
-    else:
-        file_ratio = chunk_ratio = 0
-    if stat_line: stat_line.write(f"**Status:** {stat}")
-    if file_bar: file_bar.progress(file_ratio)
-    if file_bar: file_bar_text.write(f"Files embedded: {completed_files} / {total_files}")
-    if chunk_bar: chunk_bar.progress(chunk_ratio)
-    if chunk_bar: chunk_bar_text.write(f"Chunks embedded: {processed_chunks}")
-    return stat
-
-# --- BACKGROUND INGESTION PARALLEL LAUNCH + PROGRESS UI ---
-def launch_embedding_worker(session_name, embedding_model):
-    python_exec = os.environ.get("PYTHON_EXEC", "python3")
-    script_path = os.path.join(os.getcwd(), "embedding_worker.py")
-    proc = subprocess.Popen([python_exec, script_path, session_name, embedding_model])
-    return proc
+if 'stop_ingest_triggered' in locals() and stop_ingest_triggered:
+    multi_gpu = False
+    if st.session_state.get("session_page_state") == "NEW":
+        multi_gpu = get_num_gpus() and get_num_gpus() > 1
+        stop_current_ingest_sessions(st.session_state["session_name"], multi_gpu=multi_gpu)
+    elif st.session_state.get("session_page_state") == "RESUME":
+        cur_session = st.session_state.get("selected_session")
+        if cur_session and "-gpu" in cur_session:
+            multi_gpu = True
+        stop_current_ingest_sessions(cur_session, multi_gpu=multi_gpu)
+    st.session_state["run_ingest"] = False
+    st.session_state["session_page_state"] = None
+    st.rerun()
 
 if (st.session_state.get("run_ingest") or run_ingest_triggered) and session_choice_made:
     st.session_state["run_ingest"] = True
@@ -169,17 +249,32 @@ if (st.session_state.get("run_ingest") or run_ingest_triggered) and session_choi
         if prev:
             st.warning("Session already exists. Please pick a new name or resume.")
         else:
-            sess = start_session(session_name, selected_dirs[0], total_files=total_files, total_chunks=None)
-            proc = launch_embedding_worker(session_name, selected_embedding_model)
-            st.success(f"Started session {session_name} for dir {selected_dirs[0]} (PID {proc.pid}) in the background using embedding model `{selected_embedding_model}`.")
+            num_gpus = get_num_gpus()
+            if num_gpus and num_gpus > 1:
+                sublists = partition(file_list, num_gpus)
+                sessions = []
+                procs = []
+                for i in range(num_gpus):
+                    sess_name = f"{session_name}-gpu{i}"
+                    partition_fname = f".gpu-partition-{sess_name}.txt"
+                    write_partition_file(sublists[i], partition_fname)
+                    sess = start_session(sess_name, selected_dirs[0], total_files=len(sublists[i]), total_chunks=None)
+                    sessions.append(sess)
+                    proc = launch_embedding_worker(sess_name, selected_embedding_model, gpu=i, partition_file=partition_fname)
+                    procs.append(proc)
+                st.success(f"Started {num_gpus} embedding workers in parallel (each on a separate GPU). Sessions: {[s.session_name for s in sessions]}")
+            else:
+                sess = start_session(session_name, selected_dirs[0], total_files=total_files, total_chunks=None)
+                proc = launch_embedding_worker(session_name, selected_embedding_model)
+                st.success(f"Started session {session_name} for dir {selected_dirs[0]} (PID {proc.pid}) in the background using embedding model `{selected_embedding_model}`.")
             poll_sec = 1.0
             stat_line = st.empty()
             file_bar = st.empty()
             file_bar_text = st.empty()
-            chunk_bar = st.empty()
+            # Only show number of chunks as integer, not percent/progress bar
             chunk_bar_text = st.empty()
             for _ in range(100000):
-                stat = poll_session_progress_bars(session_name, file_bar, chunk_bar, stat_line)
+                stat = poll_session_progress_bars(session_name, file_bar, chunk_bar_text, stat_line)
                 time.sleep(poll_sec)
                 if stat in {"complete", "error"}: break
             st.write(f"Session `{session_name}` finished with status {stat}.")
@@ -194,10 +289,9 @@ if (st.session_state.get("run_ingest") or run_ingest_triggered) and session_choi
         stat_line = st.empty()
         file_bar = st.empty()
         file_bar_text = st.empty()
-        chunk_bar = st.empty()
         chunk_bar_text = st.empty()
         for _ in range(100000):
-            stat = poll_session_progress_bars(session_name, file_bar, chunk_bar, stat_line)
+            stat = poll_session_progress_bars(session_name, file_bar, chunk_bar_text, stat_line)
             time.sleep(1.0)
             if stat in {"complete", "error"}: break
         st.write(f"Session `{session_name}` finished with status {stat}.")
@@ -205,7 +299,6 @@ if (st.session_state.get("run_ingest") or run_ingest_triggered) and session_choi
         st.session_state["session_page_state"] = None
         st.rerun()
 
-# --- RAG FUNCTIONALITY AS BEFORE ---
 st.markdown("## Legal Document & Hybrid Search")
 query = st.text_input("Enter a legal research query or plain search...")
 top_k = st.slider("How many results?", min_value=1, max_value=10, value=5)
