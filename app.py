@@ -1,13 +1,9 @@
 """
 Streamlit front end for auslegalsearchv2.
-- Ensures progress bars never crash (values clamped to [0, 1]).
-- Resume button labeled "Resume Session".
-- Shows DB string with password masked plus a code-block, with DB URL breakdown.
-- Lets user choose embedding model in sidebar for ingestion, and shows which is used.
-- Auto-detects GPUs; launches 1 worker per GPU with data partitioning for max parallelism. Falls back to 1 process when no GPU available.
-- STOP INGESTION resets stopped pipeline in DB and UI and works for both single and multi-GPU runs.
-- Ensures each embedding_worker processes a unique, assigned partition of files (no overlap, progress is exact), even with multiple recursive directories.
-- Shows percentage/progress bar for files, chunk count as plain number (not percent/progress).
+- Ensures progress bars never crash.
+- Resume and start load buttons renamed.
+- Sidebar now shows "App", "Chat" menu.
+- Below "Open Legal Assistant" add a "Load Data" button (no click action) styled differently, centered.
 """
 
 import streamlit as st
@@ -44,7 +40,6 @@ def partition(lst, n):
 def get_child_gpu_sessions(parent_session):
     with SessionLocal() as session:
         pattern = f"{parent_session}-gpu%"
-        # Use LIKE for matching all child session names
         return session.query(type(get_session(parent_session))).filter(type(get_session(parent_session)).session_name.like(pattern)).all()
 
 st.set_page_config(page_title="AUSLegalSearch v2", layout="wide")
@@ -86,21 +81,36 @@ if not model_list:
     model_list = ["llama3"]
 selected_model = st.sidebar.selectbox("RAG LLM model (Ollama)", model_list, index=0)
 
-st.sidebar.markdown("---")
-st.sidebar.subheader("Ingestion / Embedding Session")
+# ---- Sidebar Navigation "App" and "Chat" ----
+st.sidebar.markdown("""
+<div style="display:flex;gap:10px;margin-bottom:6px;">
+  <a href="/" target="_self" style="font-weight:bold;color:#3475ce;padding:8px 18px 8px 12px;background:#f7fafc;border-radius:7px;margin-right:6px;text-decoration:none;box-shadow:0 2px 4px #e7e7ff22;">App</a>
+  <a href="/chat" target="_self" style="font-weight:bold;color:#3ebbaf;padding:8px 20px 8px 12px;background:#f6fff6;border-radius:7px;text-decoration:none;box-shadow:0 2px 4px #b0ffc322;">Chat</a>
+</div>
+""", unsafe_allow_html=True)
+
+# Open Legal Assistant button and Load Data button (centered, styled)
+st.sidebar.markdown("""
+<a target="_blank" href="/chat" style="background:#2274a5;color:white;text-decoration:none;display:block;font-size:22px;padding:8px 16px;margin:18px auto 0 auto;border-radius:30px;width:84%;text-align:center;font-weight:bold;">
+💬  Open Legal Assistant Chat
+</a>
+<div style="background:#2ad0b1;color:#fff;text-align:center;font-size:20px;font-weight:bold;border-radius:30px;width:67%;margin:18px auto 8px auto;padding:8px 0;box-shadow:0 2px 10px #2ad0b155;">
+📦 Load Data
+</div>
+""", unsafe_allow_html=True)
 
 if "session_page_state" not in st.session_state:
     st.session_state["session_page_state"] = None
 
 leftcol, rightcol = st.sidebar.columns(2)
-start_new_clicked = leftcol.button("Start New Session", key="start_new_btn")
-resume_clicked = rightcol.button("Resume Session", key="resume_sess_btn")
+start_load_clicked = leftcol.button("Start Data Load", key="start_new_btn")
+resume_load_clicked = rightcol.button("Resume Data Load", key="resume_sess_btn")
 session_choice_made = False
 
-if start_new_clicked:
+if start_load_clicked:
     st.session_state["session_page_state"] = "NEW"
     session_choice_made = True
-elif resume_clicked:
+elif resume_load_clicked:
     st.session_state["session_page_state"] = "RESUME"
     session_choice_made = True
 elif st.session_state["session_page_state"]:
@@ -271,7 +281,6 @@ if (st.session_state.get("run_ingest") or run_ingest_triggered) and session_choi
             stat_line = st.empty()
             file_bar = st.empty()
             file_bar_text = st.empty()
-            # Only show number of chunks as integer, not percent/progress bar
             chunk_bar_text = st.empty()
             for _ in range(100000):
                 stat = poll_session_progress_bars(session_name, file_bar, chunk_bar_text, stat_line)

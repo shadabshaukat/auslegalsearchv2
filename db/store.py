@@ -3,16 +3,21 @@ Vector store interface for auslegalsearchv2.
 - Defines the ORM schema for documents and embeddings.
 - Provides add/search methods for plain, vector, and hybrid retrieval.
 - Adds ingestion checkpointing/resume with embedding_sessions table.
+- Now also includes chat sessions for chat history tracking.
 """
 
 from sqlalchemy.orm import declarative_base, relationship
 from sqlalchemy import Column, Integer, String, Text, ForeignKey, DateTime
 from sqlalchemy import select, desc, text
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID, JSONB
 from pgvector.sqlalchemy import Vector
 from db.connector import engine, SessionLocal
 from embedding.embedder import Embedder
 from datetime import datetime
+import uuid
+import json
 import numpy as np
+import os
 
 embedder = Embedder()
 EMBEDDING_DIM = embedder.dimension
@@ -47,6 +52,7 @@ class EmbeddingSession(Base):
     total_files = Column(Integer, nullable=True)
     total_chunks = Column(Integer, nullable=True)
     processed_chunks = Column(Integer, nullable=True)
+
 class EmbeddingSessionFile(Base):
     __tablename__ = "embedding_session_files"
     id = Column(Integer, primary_key=True)
@@ -55,8 +61,36 @@ class EmbeddingSessionFile(Base):
     status = Column(String, nullable=False, default="pending") # 'pending', 'complete', 'error'
     completed_at = Column(DateTime, nullable=True)
 
+class ChatSession(Base):
+    __tablename__ = "chat_sessions"
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    started_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    ended_at = Column(DateTime, nullable=True)
+    chat_history = Column(JSONB, nullable=False)
+    llm_params = Column(JSONB, nullable=False)
+
 def create_all_tables():
     Base.metadata.create_all(engine)
+
+# -- Chat Session functions --
+def save_chat_session(chat_history, llm_params, ended_at=None):
+    # chat_history must be serializable (list of dicts), llm_params is flat dict
+    with SessionLocal() as session:
+        chat_sess = ChatSession(
+            chat_history=chat_history, 
+            llm_params=llm_params, 
+            ended_at=ended_at or datetime.utcnow()
+        )
+        session.add(chat_sess)
+        session.commit()
+        session.refresh(chat_sess)
+        return chat_sess.id
+
+def get_chat_session(chat_id):
+    with SessionLocal() as session:
+        return session.query(ChatSession).filter_by(id=chat_id).first()
+
+# --- rest is unchanged (doc/embedding/session logic) ---
 
 def start_session(session_name, directory, total_files=None, total_chunks=None):
     with SessionLocal() as session:
@@ -173,5 +207,40 @@ def search_vector(query_vec, top_k=5):
                 "format": row[5],
             })
         return hits
+
+def search_bm25(query, top_k=5):
+    # Simple fallback: naive "ILIKE" for fulltext—replace w/pg_fulltext or pg_trgm for real prod
+    with SessionLocal() as session:
+        q = f"%{query}%"
+        res = session.execute(
+            text("""
+                SELECT id, content, source, format
+                FROM documents
+                WHERE content ILIKE :q
+                LIMIT :topk
+            """), {"q": q, "topk": top_k}
+        )
+        hits = []
+        for row in res:
+            hits.append({
+                "doc_id": row[0],
+                "chunk_index": 0,
+                "score": 1.0,
+                "text": row[1],
+                "source": row[2],
+                "format": row[3],
+            })
+        return hits
+
+def get_file_contents(filepath):
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception as e:
+        try:
+            with open(filepath, "r", encoding="latin-1") as f:
+                return f.read()
+        except Exception:
+            return f"Could not read file: {filepath}"
 
 create_all_tables()
