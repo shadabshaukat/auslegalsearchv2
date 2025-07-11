@@ -42,6 +42,15 @@ def get_child_gpu_sessions(parent_session):
         pattern = f"{parent_session}-gpu%"
         return session.query(type(get_session(parent_session))).filter(type(get_session(parent_session)).session_name.like(pattern)).all()
 
+# AUTH WALL: force login if no session, always at top
+import streamlit as st
+if "user" not in st.session_state:
+    st.warning("You must login to continue.")
+    if hasattr(st, "switch_page"):
+        st.switch_page("pages/login.py")
+    else:
+        st.stop()
+
 st.set_page_config(page_title="AUSLegalSearch v2", layout="wide")
 st.title("AUSLegalSearch v2 – Legal Document Search, Background Embedding & RAG")
 

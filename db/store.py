@@ -4,10 +4,11 @@ Vector store interface for auslegalsearchv2.
 - Provides add/search methods for plain, vector, and hybrid retrieval.
 - Adds ingestion checkpointing/resume with embedding_sessions table.
 - Now also includes chat sessions for chat history tracking.
+- Now includes User authentication table.
 """
 
 from sqlalchemy.orm import declarative_base, relationship
-from sqlalchemy import Column, Integer, String, Text, ForeignKey, DateTime
+from sqlalchemy import Column, Integer, String, Text, ForeignKey, DateTime, Boolean
 from sqlalchemy import select, desc, text
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID, JSONB
 from pgvector.sqlalchemy import Vector
@@ -18,11 +19,23 @@ import uuid
 import json
 import numpy as np
 import os
+import bcrypt
 
 embedder = Embedder()
 EMBEDDING_DIM = embedder.dimension
 
 Base = declarative_base()
+
+class User(Base):
+    __tablename__ = "users"
+    id = Column(Integer, primary_key=True)
+    email = Column(String, unique=True, nullable=False, index=True)
+    password_hash = Column(String, nullable=True)
+    registered_google = Column(Boolean, default=False)
+    google_id = Column(String, nullable=True)
+    name = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    last_login = Column(DateTime, nullable=True)
 
 class Document(Base):
     __tablename__ = "documents"
@@ -71,6 +84,45 @@ class ChatSession(Base):
 
 def create_all_tables():
     Base.metadata.create_all(engine)
+
+# --- User CRUD and Auth logic ---
+
+def hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+def check_password(password: str, hashval: str) -> bool:
+    return bcrypt.checkpw(password.encode('utf-8'), hashval.encode('utf-8'))
+
+def create_user(email, password=None, name=None, google_id=None, registered_google=False):
+    with SessionLocal() as session:
+        user = User(
+            email=email,
+            password_hash=hash_password(password) if password else None,
+            name=name,
+            google_id=google_id,
+            registered_google=registered_google,
+            created_at=datetime.utcnow(),
+            last_login=datetime.utcnow(),
+        )
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+        return user
+
+def get_user_by_email(email: str):
+    with SessionLocal() as session:
+        return session.query(User).filter_by(email=email).first()
+
+def set_last_login(user_id: int):
+    with SessionLocal() as session:
+        user = session.query(User).filter_by(id=user_id).first()
+        if user:
+            user.last_login = datetime.utcnow()
+            session.commit()
+
+def get_user_by_googleid(google_id: str):
+    with SessionLocal() as session:
+        return session.query(User).filter_by(google_id=google_id).first()
 
 # -- Chat Session functions --
 def save_chat_session(chat_history, llm_params, ended_at=None):

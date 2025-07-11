@@ -15,3 +15,4 @@ lxml
 # For BM25 and hybrid search
 rank_bm25
 requests
+bcrypt
