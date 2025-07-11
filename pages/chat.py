@@ -1,19 +1,20 @@
 """
 AUSLegalSearchv2 – Legal Assistant Chat (Full RAG Chatbot Experience)
 - True memory-based chat with secure context retention
-- Now includes chat turn memory: LLM prompt includes the last few user and assistant messages, ensuring chain-of-thought and clarification/followup.
+- Now includes chat turn memory: LLM prompt includes last few user/assistant messages.
+- Robust session save: stores username and first question in chat_sessions table for every session.
+- Uses only native Streamlit navigation/sidebar.
 """
 
 import streamlit as st
 from db.store import search_vector, search_bm25, get_file_contents, save_chat_session
 from embedding.embedder import Embedder
 from rag.rag_pipeline import RAGPipeline, list_ollama_models
-from datetime import datetime
+from datetime import datetime, timezone
 import time
 import uuid
 
 # AUTH WALL: force login if no session, always at top
-import streamlit as st
 if "user" not in st.session_state:
     st.warning("You must login to continue.")
     if hasattr(st, "switch_page"):
@@ -56,7 +57,7 @@ if "custom_prompt" not in st.session_state:
 if "chat_session_id" not in st.session_state:
     st.session_state["chat_session_id"] = str(uuid.uuid4())
 if "session_started_at" not in st.session_state:
-    st.session_state["session_started_at"] = datetime.utcnow().isoformat()
+    st.session_state["session_started_at"] = datetime.now(timezone.utc).isoformat()
 
 model_list = list_ollama_models()
 selected_model = st.sidebar.selectbox("LLM for RAG", model_list, index=0) if model_list else "llama3"
@@ -68,8 +69,17 @@ with st.sidebar:
     started = st.session_state["session_started_at"]
     st.markdown(f"<span class='session-line'>Session ID:<br><b>{session_id}</b><br>Start: <b>{started.split('.')[0].replace('T', ' ')}</b></span>", unsafe_allow_html=True)
     if st.button("Start New Chat Session"):
+        # Capture username as string (use email) and first user question in history
+        user = st.session_state.get("user")
+        username = user["email"] if isinstance(user, dict) and "email" in user else str(user)
+        chat_history = st.session_state["chat_history"]
+        question = None
+        for msg in chat_history:
+            if msg.get("role") == "user" and msg.get("content"):
+                question = msg["content"]
+                break
         save_chat_session(
-            chat_history=st.session_state["chat_history"],
+            chat_history=chat_history,  # pass list/dict, not JSON string
             llm_params={
                 "model": selected_model,
                 "temperature": float(st.session_state.get("temperature", 0.2)),
@@ -79,11 +89,13 @@ with st.sidebar:
                 "custom_prompt": st.session_state["custom_prompt"],
                 "top_k": int(st.session_state.get("top_k", 7)),
             },
-            ended_at=datetime.utcnow()
+            ended_at=datetime.now(timezone.utc),
+            username=username,
+            question=question
         )
         st.session_state["chat_history"] = []
         st.session_state["chat_session_id"] = str(uuid.uuid4())
-        st.session_state["session_started_at"] = datetime.utcnow().isoformat()
+        st.session_state["session_started_at"] = datetime.now(timezone.utc).isoformat()
         if hasattr(st, "rerun"):
             st.rerun()
         else:

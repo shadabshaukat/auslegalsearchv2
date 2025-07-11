@@ -1,9 +1,7 @@
 """
-Streamlit front end for auslegalsearchv2.
-- Ensures progress bars never crash.
-- Resume and start load buttons renamed.
-- Sidebar now shows "App", "Chat" menu.
-- Below "Open Legal Assistant" add a "Load Data" button (no click action) styled differently, centered.
+AUSLegalSearch v2 – Main App Page (no experimental multipage plugins)
+- Native Streamlit navigation: App, Chat, and Login.
+- Username and question capture for chat sessions is preserved (see chat page logic for details).
 """
 
 import streamlit as st
@@ -22,37 +20,16 @@ import subprocess
 import time
 import re
 
-def get_num_gpus():
-    try:
-        import torch
-        return torch.cuda.device_count()
-    except Exception:
-        try:
-            out = subprocess.check_output(['nvidia-smi', '--list-gpus']).decode()
-            return len([l for l in out.split('\n') if 'GPU' in l])
-        except Exception:
-            return 0
-
-def partition(lst, n):
-    k, m = divmod(len(lst), n)
-    return [lst[i * k + min(i, m):(i + 1) * k + min(i + 1, m)] for i in range(n)]
-
-def get_child_gpu_sessions(parent_session):
-    with SessionLocal() as session:
-        pattern = f"{parent_session}-gpu%"
-        return session.query(type(get_session(parent_session))).filter(type(get_session(parent_session)).session_name.like(pattern)).all()
+st.set_page_config(page_title="AUSLegalSearch v2", layout="wide")
+st.title("AUSLegalSearch v2 – Legal Document Search, Background Embedding & RAG")
 
 # AUTH WALL: force login if no session, always at top
-import streamlit as st
 if "user" not in st.session_state:
     st.warning("You must login to continue.")
     if hasattr(st, "switch_page"):
         st.switch_page("pages/login.py")
     else:
         st.stop()
-
-st.set_page_config(page_title="AUSLegalSearch v2", layout="wide")
-st.title("AUSLegalSearch v2 – Legal Document Search, Background Embedding & RAG")
 
 if "directories" not in st.session_state:
     st.session_state["directories"] = set()
@@ -90,23 +67,7 @@ if not model_list:
     model_list = ["llama3"]
 selected_model = st.sidebar.selectbox("RAG LLM model (Ollama)", model_list, index=0)
 
-# ---- Sidebar Navigation "App" and "Chat" ----
-st.sidebar.markdown("""
-<div style="display:flex;gap:10px;margin-bottom:6px;">
-  <a href="/" target="_self" style="font-weight:bold;color:#3475ce;padding:8px 18px 8px 12px;background:#f7fafc;border-radius:7px;margin-right:6px;text-decoration:none;box-shadow:0 2px 4px #e7e7ff22;">App</a>
-  <a href="/chat" target="_self" style="font-weight:bold;color:#3ebbaf;padding:8px 20px 8px 12px;background:#f6fff6;border-radius:7px;text-decoration:none;box-shadow:0 2px 4px #b0ffc322;">Chat</a>
-</div>
-""", unsafe_allow_html=True)
-
-# Open Legal Assistant button and Load Data button (centered, styled)
-st.sidebar.markdown("""
-<a target="_blank" href="/chat" style="background:#2274a5;color:white;text-decoration:none;display:block;font-size:22px;padding:8px 16px;margin:18px auto 0 auto;border-radius:30px;width:84%;text-align:center;font-weight:bold;">
-💬  Open Legal Assistant Chat
-</a>
-<div style="background:#2ad0b1;color:#fff;text-align:center;font-size:20px;font-weight:bold;border-radius:30px;width:67%;margin:18px auto 8px auto;padding:8px 0;box-shadow:0 2px 10px #2ad0b155;">
-📦 Load Data
-</div>
-""", unsafe_allow_html=True)
+# --- PAGE LOGIC UNCHANGED BELOW ---
 
 if "session_page_state" not in st.session_state:
     st.session_state["session_page_state"] = None
@@ -230,8 +191,7 @@ if st.session_state["session_page_state"] == "NEW":
     run_ingest_triggered = st.sidebar.button("Start Ingestion", disabled=not(session_name and selected_dirs), key="start_ingest_btn")
     stop_ingest_triggered = st.sidebar.button("Stop Ingestion", key="stop_ingest_btn")
 elif st.session_state["session_page_state"] == "RESUME":
-    from db.store import get_resume_sessions
-    sessions = get_resume_sessions()
+    sessions = get_active_sessions()
     session_names = [s.session_name for s in sessions]
     selected_session = st.sidebar.selectbox("Resume Session", session_names)
     st.session_state["selected_session"] = selected_session
@@ -262,6 +222,7 @@ if (st.session_state.get("run_ingest") or run_ingest_triggered) and session_choi
     st.session_state["run_ingest"] = True
     session_type = st.session_state["session_page_state"]
     if session_type == "NEW":
+        selected_dirs = sorted(st.session_state["directories"])
         file_list = list(loader.walk_legal_files(selected_dirs))
         total_files = len(file_list)
         prev = get_session(session_name)

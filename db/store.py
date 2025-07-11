@@ -79,6 +79,8 @@ class ChatSession(Base):
     id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     started_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     ended_at = Column(DateTime, nullable=True)
+    username = Column(String, nullable=True)
+    question = Column(Text, nullable=True)
     chat_history = Column(JSONB, nullable=False)
     llm_params = Column(JSONB, nullable=False)
 
@@ -125,13 +127,15 @@ def get_user_by_googleid(google_id: str):
         return session.query(User).filter_by(google_id=google_id).first()
 
 # -- Chat Session functions --
-def save_chat_session(chat_history, llm_params, ended_at=None):
+def save_chat_session(chat_history, llm_params, ended_at=None, username=None, question=None):
     # chat_history must be serializable (list of dicts), llm_params is flat dict
     with SessionLocal() as session:
         chat_sess = ChatSession(
             chat_history=chat_history, 
             llm_params=llm_params, 
-            ended_at=ended_at or datetime.utcnow()
+            ended_at=ended_at or datetime.utcnow(),
+            username=username,
+            question=question
         )
         session.add(chat_sess)
         session.commit()
