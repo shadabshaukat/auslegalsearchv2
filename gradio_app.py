@@ -104,6 +104,7 @@ with gr.Blocks(title="LegalSearch Gradio UI") as demo:
             refresh_models_chat = gr.Button("Refresh LLM Models", variant="secondary")
             chat_hist = gr.Chatbot(label="Legal Assistant", height=340, type="messages")
             chat_input = gr.Textbox(label="Type your legal question here")
+            chat_prompt = gr.Textbox(label="Custom System Prompt (optional)", value="", lines=2)
             chat_btn = gr.Button("Send")
             chat_status = gr.Markdown("")
             chat_debug = gr.Markdown("")
@@ -182,29 +183,43 @@ with gr.Blocks(title="LegalSearch Gradio UI") as demo:
         except Exception as e:
             return [["Error", "", "", str(e)]], {}, debugmsg
 
-    def chat_fn(history, message, llm_model):
+    def chat_fn(history, message, llm_model, custom_prompt):
         debugmsg = (
-            f"DEBUG: Chat POST — dropdown value: '{llm_model}'\n"
+            f"DEBUG: Chat→RAG — dropdown value: '{llm_model}'\n"
             f"Dropdown choices: {getattr(chat_llm_model, 'choices', None)}\n"
             f"Dropdown value: {getattr(chat_llm_model, 'value', None)}\n"
         )
-        payload = None
+        import json
         try:
             if not llm_model or llm_model in ["", None]:
                 debugmsg += "[ERROR] model was not selected! Using fallback.\n"
                 llm_model = "llama3"
-            payload = {"prompt": message, "model": llm_model}
-            r = requests.post(
-                f"{API_ROOT}/chat/session",
-                json=payload,
-                auth=SESS.auth
-            )
-            debugmsg += f"POST payload: {payload}\n"
-            dat = r.json()
-            reply = dat.get("answer", "")
+            # 1. Get context chunks via vector search (default top_k=5)
+            vector_payload = {"query": message, "top_k": 5}
+            r_vec = requests.post(f"{API_ROOT}/search/vector", json=vector_payload, auth=SESS.auth)
+            context_results = r_vec.json() if r_vec.ok else []
+            chunks = [c.get("text", "") for c in context_results]
+            sources = [c.get("source", "") for c in context_results]
+            debugmsg += f"[RAG] Got {len(chunks)} context chunks from vector search.\n"
+            if not chunks:
+                reply = "No relevant context found in document database for this query."
+            else:
+                # 2. Compose RAG payload
+                rag_payload = {
+                    "question": message,
+                    "context_chunks": chunks,
+                    "sources": sources,
+                    "top_k": 5,
+                    "model": llm_model,
+                }
+                if custom_prompt.strip():
+                    rag_payload["prompt"] = custom_prompt.strip()
+                r_rag = requests.post(f"{API_ROOT}/search/rag", json=rag_payload, auth=SESS.auth)
+                dat = r_rag.json() if r_rag.ok else {}
+                reply = dat.get("answer", "") if isinstance(dat, dict) else "No answer returned from RAG endpoint."
+                debugmsg += f"RAG POST payload: {json.dumps(rag_payload)[:512]}...\n"
             if not isinstance(history, list):
                 history = []
-            # For type='messages' format
             return (
                 history + [
                     {"role": "user", "content": message},
@@ -277,7 +292,7 @@ with gr.Blocks(title="LegalSearch Gradio UI") as demo:
         inputs=[search_type, search_query, search_top_k, rag_llm_model],
         outputs=[search_out, rag_answer, search_debug],
     )
-    chat_btn.click(chat_fn, inputs=[chat_hist, chat_input, chat_llm_model], outputs=[chat_hist, chat_status, chat_debug])
+    chat_btn.click(chat_fn, inputs=[chat_hist, chat_input, chat_llm_model, chat_prompt], outputs=[chat_hist, chat_status, chat_debug])
 
     def refresh_models_fn():
         default_models = ["llama3.2", "llama4"]
