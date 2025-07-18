@@ -171,16 +171,16 @@ with gr.Blocks(title="LegalSearch Gradio UI") as demo:
             debugmsg += f"POST payload: {payload}\n"
             dat = r.json()
             if isinstance(dat, list):
-                return [[x.get("score", ""), x.get("chunk_index", ""), x.get("source", ""), x.get("text", "")] for x in dat], "", debugmsg
+                return [[x.get("score", ""), x.get("chunk_index", ""), x.get("source", ""), x.get("text", "")] for x in dat], {}, debugmsg
             elif isinstance(dat, dict):
                 # For RAG, show answer and source docs
                 rows = []
                 for i, x in enumerate(dat.get("contexts", [])):
                     rows.append([i+1, "", dat.get("sources", [""])[i] if i < len(dat.get("sources", [])) else "", x])
                 return rows, (dat.get("answer", "") + "\n" + debugmsg), debugmsg
-            return [["No results or error", "", "", ""]], "", debugmsg
+            return [["No results or error", "", "", ""]], {}, debugmsg
         except Exception as e:
-            return [["Error", "", "", str(e)]], f"Error: {str(e)}, {debugmsg}", debugmsg
+            return [["Error", "", "", str(e)]], {}, debugmsg
 
     def chat_fn(history, message, llm_model):
         debugmsg = (
