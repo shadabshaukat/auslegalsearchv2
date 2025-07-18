@@ -23,6 +23,18 @@ import re
 st.set_page_config(page_title="AUSLegalSearch v2", layout="wide")
 st.title("AUSLegalSearch v2 – Legal Document Search, Background Embedding & RAG")
 
+def get_num_gpus():
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["nvidia-smi", "-L"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, text=True
+        )
+        gpus = [line for line in result.stdout.split("\n") if "GPU" in line]
+        return len(gpus)
+    except Exception:
+        return 1  # Default: assume CPU-only (1 "virtual" device)
+
 # AUTH WALL: force login if no session, always at top
 if "user" not in st.session_state:
     st.warning("You must login to continue.")
@@ -85,6 +97,11 @@ elif resume_load_clicked:
     session_choice_made = True
 elif st.session_state["session_page_state"]:
     session_choice_made = True
+
+def partition(l, n):
+    """Split list l into n nearly equal sublists."""
+    k, m = divmod(len(l), n)
+    return [l[i*k + min(i, m):(i+1)*k + min(i+1, m)] for i in range(n)]
 
 def write_partition_file(partition, fname):
     with open(fname, "w") as f:
