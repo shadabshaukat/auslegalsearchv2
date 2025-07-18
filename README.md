@@ -48,10 +48,11 @@
 
 ## 2. Backend Server Setup (Ubuntu)
 
-### a. Install System Packages
+### a. Install System Packages & Whitelist Port
 ```sh
 sudo apt update && sudo apt upgrade -y
 sudo apt install python3 python3-venv python3-pip git postgresql libpq-dev gcc unzip curl -y
+sudo iptables -I INPUT -p tcp --dport 8501 -j ACCEPT
 ```
 ### b. Prepare Python Virtual Environment
 ```sh
@@ -64,7 +65,16 @@ pip install -r requirements.txt
 ```
 ### c. Configure Environment (.env, .streamlit/config.toml)
 - Edit `.streamlit/config.toml` for Streamlit binding (e.g., `address = "localhost"`).
+- For `0.0.0.0` binding comment out all lines in the file `.streamlit/config.toml`
 - Configure PostgreSQL (create DB, user as needed).
+- Set DB environment variables
+```
+export AUSLEGALSEARCH_DB_HOST=localhost
+export AUSLEGALSEARCH_DB_PORT=5432
+export AUSLEGALSEARCH_DB_USER=postgres       
+export AUSLEGALSEARCH_DB_PASSWORD='YourPasswordHere'  
+export AUSLEGALSEARCH_DB_NAME=postgres
+```
 
 ### d. Run and Persist the App (optional: with systemd)
 ```sh
