@@ -16,3 +16,8 @@ lxml
 rank_bm25
 requests
 bcrypt
+#FastAPi and GradIO
+gradio
+uvicorn
+fastapi
+pydantic

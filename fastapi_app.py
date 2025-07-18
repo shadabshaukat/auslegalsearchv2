@@ -119,10 +119,11 @@ class RagReq(BaseModel):
     top_p: float = 0.90
     max_tokens: int = 1024
     repeat_penalty: float = 1.1
+    model: Optional[str] = "llama3"
 
 @app.post("/search/rag", tags=["search"])
 def api_search_rag(req: RagReq, _: str = Depends(get_current_user)):
-    rag = RAGPipeline(model="llama3")  # or expose as a param
+    rag = RAGPipeline(model=req.model or "llama3")
     return rag.query(
         req.question, context_chunks=req.context_chunks, sources=req.sources,
         custom_prompt=req.custom_prompt, temperature=req.temperature,
@@ -132,11 +133,12 @@ def api_search_rag(req: RagReq, _: str = Depends(get_current_user)):
 ### Chat Session endpoints
 class ChatMsg(BaseModel):
     prompt: str
+    model: Optional[str] = "llama3"
 
 @app.post("/chat/session", tags=["chat"])
 def api_chat_session(msg: ChatMsg, _: str = Depends(get_current_user)):
     # Stateless RAG chat. For stateful: persist/return session token.
-    rag = RAGPipeline(model="llama3")
+    rag = RAGPipeline(model=msg.model or "llama3")
     results = search_bm25(msg.prompt, top_k=5)
     context_chunks = [r["text"] for r in results]
     sources = [r["source"] for r in results]

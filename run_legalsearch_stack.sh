@@ -1,14 +1,22 @@
 #!/bin/bash
 
-# Start the FastAPI backend (in background)
+# Start FastAPI backend (Uvicorn) in background (old port: 8000)
 uvicorn fastapi_app:app --host 0.0.0.0 --port 8000 &
 FASTAPI_PID=$!
+echo $FASTAPI_PID > .fastapi_pid
 
-# Wait a moment to ensure FastAPI is up
-sleep 2
+# Start Gradio frontend in background (old port: 7860)
+python gradio_app.py &
+GRADIO_PID=$!
+echo $GRADIO_PID > .gradio_pid
 
-# Start the Gradio frontend
-python gradio_app.py
+# Start Streamlit frontend in background (force port 8501)
+streamlit run app.py --server.port 8501 &
+STREAMLIT_PID=$!
+echo $STREAMLIT_PID > .streamlit_pid
 
-# Cleanup: stop FastAPI server on exit
-kill $FASTAPI_PID
+echo
+echo "To stop all, run: bash stop_legalsearch_stack.sh"
+echo
+
+wait
