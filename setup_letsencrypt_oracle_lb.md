@@ -38,8 +38,12 @@ Certs save to: `/etc/letsencrypt/live/auslegal.oraclecloudserver.com/`
   - (possibly chain pem, if not using fullchain)
 - In OCI Console: **Load Balancers → Your LB → Management → Certificates**  
   - Create/Import Certificate
-  - Upload those PEM files as prompted.
-
+  - Upload those PEM files as prompted or Paste the contents of the .pem files
+- **Important Note**
+  - SSL Certificate in OCI is `fullchain.pem`
+  - CA Certificate in OCI is `cert.pem`
+  - Private Key in OCI is `privkey.pem`   
+   
 4. **Configure Listener and Rule for HTTPS**
 
 - In LB, create a new listener (HTTPS:443) using the certificate.
