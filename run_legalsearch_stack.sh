@@ -6,6 +6,8 @@ FASTAPI_PID=$!
 echo $FASTAPI_PID > .fastapi_pid
 
 # Start Gradio frontend in background (old port: 7860)
+export GRADIO_SERVER_NAME="0.0.0.0"
+export GRADIO_SERVER_PORT=8000
 python gradio_app.py &
 GRADIO_PID=$!
 echo $GRADIO_PID > .gradio_pid
